@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: winwin-vera
+    runtime: python
+    plan: 0.5c-512mb
+    numInstances: 1
+    buildCommand: python -m unittest -q test_bot
+    startCommand: python -u bot.py
+    healthCheckPath: /v1/healthz
+    autoDeployTrigger: "off"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
+      - key: PYTHONUTF8
+        value: "1"
+      - key: TEAM_NAME
+        value: winwin
+      - key: TEAM_MEMBERS
+        value: Poonam
+      - key: CONTACT_EMAIL
+        value: poonamrrj18@gmail.com
+      - key: SUBMITTED_AT
+        value: "2026-09-26T00:00:00Z"

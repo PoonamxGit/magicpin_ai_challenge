@@ -1,0 +1,8 @@
+{
+  "scenario": "all",
+  "passed": true,
+  "actions_observed": 0,
+  "llm_score": null,
+  "simulated_now": null,
+  "adapter": "Official JudgeSimulator scenario methods, no-scoring observer; optional tick clock override. No scorer modified."
+}

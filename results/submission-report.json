@@ -1,0 +1,45 @@
+{
+  "dataset_counts": {
+    "categories": 5,
+    "merchants": 50,
+    "customers": 200,
+    "triggers": 100
+  },
+  "canonical_rows": 30,
+  "sendable": 22,
+  "suppressed": [
+    {
+      "test_id": "T03",
+      "reason": "missing_or_revoked_scoped_consent"
+    },
+    {
+      "test_id": "T04",
+      "reason": "missing_or_revoked_scoped_consent"
+    },
+    {
+      "test_id": "T08",
+      "reason": "refill_category_mismatch"
+    },
+    {
+      "test_id": "T10",
+      "reason": "unsupported_or_under_specified_trigger"
+    },
+    {
+      "test_id": "T19",
+      "reason": "unsupported_or_under_specified_trigger"
+    },
+    {
+      "test_id": "T23",
+      "reason": "unsupported_or_under_specified_trigger"
+    },
+    {
+      "test_id": "T25",
+      "reason": "performance_evidence_missing"
+    },
+    {
+      "test_id": "T29",
+      "reason": "missing_or_revoked_scoped_consent"
+    }
+  ],
+  "note": "Canonical compose artifacts are timeless; Engine.tick additionally enforces expiry, cadence and dedup."
+}

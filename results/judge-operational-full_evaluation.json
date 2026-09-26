@@ -1,0 +1,8 @@
+{
+  "scenario": "full_evaluation",
+  "passed": true,
+  "actions_observed": 11,
+  "llm_score": null,
+  "simulated_now": "2026-04-26T10:00:00Z",
+  "adapter": "Official JudgeSimulator scenario methods, no-scoring observer; optional tick clock override. No scorer modified."
+}

@@ -328,8 +328,20 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(400, self.call("/v1/tick", {"now": NOW, "available_triggers": [1]})[0])
 
     def test_payload_cap(self):
-        status, data = self.call("/v1/context", raw=b"x" * (500 * 1024 + 1))
-        self.assertEqual(413, status)
+        # Send oversized Content-Length without the body: rejection is header-based.
+        # Sending 500KB while the server closes early can cause a Windows TCP reset.
+        from http.client import HTTPConnection
+        connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        try:
+            connection.putrequest("POST", "/v1/context")
+            connection.putheader("Content-Type", "application/json")
+            connection.putheader("Content-Length", str(500 * 1024 + 1))
+            connection.endheaders()
+            response = connection.getresponse()
+            self.assertEqual(413, response.status)
+            self.assertEqual("payload_too_large", json.load(response)["reason"])
+        finally:
+            connection.close()
 
     def test_unknown_route(self):
         self.assertEqual(404, self.call("/unknown")[0])

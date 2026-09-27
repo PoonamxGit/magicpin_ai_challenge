@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 UTC = timezone.utc
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 SCOPES = ("category", "merchant", "customer", "trigger")
 URL = re.compile(r"(?:https?://|www\.)\S+", re.I)
 AUTO = re.compile(r"thank(?:s| you) for (?:contacting|reaching)|our team will respond|automated (?:assistant|reply|message)|auto.?reply|currently (?:closed|unavailable)|team tak pahunch|स्वचालित", re.I)
@@ -133,6 +133,11 @@ def item_for(category, trigger):
         return next((x for x in category.get("digest", []) if x.get("id") == reference), None)
     if isinstance(p.get("top_item"), dict):
         return p["top_item"]
+    kind = ALIASES.get(trigger.get("kind"), trigger.get("kind"))
+    # Only research has an unreferenced latest-item fallback. Compliance and
+    # alerts require an explicit reference rather than an unrelated citation.
+    if kind != "research_digest":
+        return None
     return next((x for x in reversed(category.get("digest", []))
                  if x.get("kind") == "research"), None)
 
@@ -158,17 +163,106 @@ def slots_text(payload):
     return "Listed options (subject to confirmation): " + " or ".join(valid) + "." if valid else ""
 
 
+def active_offer(merchant):
+    return next((clean(o["title"]) for o in merchant.get("offers", [])
+                 if o.get("status") == "active" and o.get("title")), "")
+
+
+def next_step(kind, category, customer=None):
+    """Name the deliverable, rather than asking for an unspecified draft."""
+    if customer:
+        if kind == "chronic_refill_due":
+            return "a pharmacist refill review"
+        if kind in ("recall_due", "appointment_tomorrow", "unplanned_slot_open"):
+            return "a preferred-time request"
+        if kind == "supply_alert":
+            return "a pharmacist batch check"
+        if kind in ("bridal_followup", "wedding_package_followup"):
+            return "a bridal follow-up request"
+        if kind == "trial_followup":
+            return "a next-session request"
+        return {"gyms": "a return-to-training enquiry", "dentists": "a visit enquiry",
+                "pharmacies": "a pharmacy enquiry", "restaurants": "a menu enquiry",
+                "salons": "a service enquiry"}.get(category, "a visit enquiry")
+    return {"research_digest": "a supplied summary", "regulation_change": "a supplied compliance summary",
+            "cde_opportunity": "an event review checklist", "active_planning_intent": "a planning draft",
+            "curious_ask_due": "a demand-led post draft", "perf_dip": "a profile review checklist", "perf_spike": "an enquiry-response draft",
+            "seasonal_perf_dip": "a member check-in draft", "renewal_due": "a renewal review",
+            "festival_upcoming": "a festival enquiry draft", "ipl_match_today": "a match-day post",
+            "competitor_opened": "a service-positioning draft", "category_seasonal": "a shelf-review checklist",
+            "gbp_unverified": "a verification checklist", "dormant_with_vera": "a profile refresh checklist",
+            "winback_eligible": "a profile refresh checklist", "milestone_reached": "a milestone note",
+            "review_theme_emerged": "a review-response draft", "category_trend_movement": "a demand-check question",
+            "weather_heatwave": "a customer-update draft", "local_news_event": "a customer-update draft"}.get(kind, "a draft")
+
+
+def action_cta(lang, goal):
+    if lang == "hi":
+        label = re.sub(r"^(?:a|an) ", "", goal)
+        return f"{label.capitalize()} ke liye YES bhejiye; messages band karne ke liye STOP."
+    if lang == "en":
+        return f"Reply YES for {goal}; STOP to opt out."
+    return CTAS[lang].replace("Draft", goal.capitalize())
+
+
 def planning_draft(merchant, trigger):
     name = clean(merchant.get("identity", {}).get("name", "Your business"))
     topic = human(trigger.get("payload", {}).get("intent_topic", "profile update"))
-    offer = next((o for o in merchant.get("offers", [])
-                  if o.get("status") == "active" and "@" in o.get("title", "")), None)
-    lines = [f"Draft for review — {name}: {topic}."]
-    if offer:
-        lines.append("Current listed offer: " + clean(offer["title"]) + ".")
-    lines.append("Proposed plan: confirm the service, capacity and schedule before publishing.")
-    lines.append("New pricing and availability are still to be agreed; nothing has been published.")
-    return " ".join(lines)
+    category = merchant.get("category_slug")
+    # Proposed copy and explicit blanks: no invented package price or capacity.
+    if category == "restaurants":
+        draft = (f"Proposed enquiry copy: Planning {topic}? Share your group size and preferred date "
+                 f"with {name}; menu, quantity and a quote need confirmation.")
+        offer = active_offer(merchant)
+        if offer:
+            draft += " Retail reference only: " + offer + "; no bulk-package price is agreed."
+    elif category == "gyms":
+        draft = (f"Proposed interest check: Interested in {topic} at {name}? "
+                 "Share the participant age group and preferred days. Schedule, instructor and fees are to be confirmed.")
+    else:
+        draft = (f"Proposed enquiry copy: Interested in {topic} at {name}? "
+                 "Tell us what you need and your preferred date; details and pricing need confirmation.")
+    return f"Draft for review - {name}: {topic}. {draft} This is a proposal; nothing has been published."
+
+
+def outreach_draft(category, merchant, trigger):
+    """Deliver the specific artifact promised by the opening CTA using current contexts."""
+    kind = ALIASES.get(trigger.get("kind"), trigger.get("kind"))
+    p = trigger.get("payload", {})
+    name = clean(merchant.get("identity", {}).get("name", "Your business"))
+    offer = active_offer(merchant)
+    if kind == "category_seasonal":
+        trends = "; ".join(map(human, p.get("trends", [])))
+        return (f"Shelf-review checklist for {name}: {trends}. Compare these category signals with your own "
+                "stock and recent sales; check expiry dates before deciding quantities. No reorder has been placed.")
+    if kind in ("festival_upcoming", "ipl_match_today"):
+        event = clean(p.get("festival") or p.get("match", "the event"))
+        when = clean(p.get("date") or p.get("match_time_iso", ""))
+        return (f"Post draft for review - {name}: Planning for {event}{' (' + when + ')' if when else ''}? "
+                "Send us your requirements to discuss options. "
+                "Confirm event-day hours and availability before using this draft; no special price is promised.")
+    if kind == "competitor_opened":
+        detail = f"Our listed offer: {offer}. " if offer else ""
+        return (f"Positioning draft for review - {name}: {detail}"
+                "Ask us what the service includes before deciding. No claim of superiority or new discount is made.")
+    if kind == "milestone_reached":
+        current, threshold = p.get("value_now"), p.get("milestone_value")
+        if number(current) and number(threshold) and current < threshold and p.get("metric") == "review_count":
+            return (f"Feedback-request draft - {name}: Thank you for visiting. "
+                    "Would you share honest feedback about your experience? No rating or reward is requested.")
+        if number(current) and number(threshold) and current < threshold:
+            return f"Progress note - {name}: {clean(current)} {human(p.get('metric', ''))} recorded; target {threshold} is still ahead."
+        return f"Milestone draft - {name}: Thank you for helping us reach {clean(current)} {human(p.get('metric', ''))}."
+    if kind in ("dormant_with_vera", "winback_eligible"):
+        return (f"Profile refresh checklist - {name}: {snapshot(merchant)} "
+                "Check the listed hours, contact details and current services; mark anything outdated for review. No profile edit has been made.")
+    if kind == "category_trend_movement":
+        return (f"Demand-check draft - {name}: Are customers asking about {clean(p.get('query', ''))}? "
+                "Use their answers to decide what to feature; the search trend alone does not establish local demand.")
+    if kind in ("weather_heatwave", "local_news_event"):
+        return (f"Customer-update draft - {name}: {clean(p.get('headline') or p.get('title', ''))}. "
+                "Please confirm our current hours and availability before visiting.")
+    return planning_draft(merchant, trigger)
 
 
 def _parts(category, merchant, trigger, customer=None):
@@ -205,8 +299,9 @@ def _parts(category, merchant, trigger, customer=None):
     if not customer and category.get("slug") == "dentists" and name and not name.startswith("Dr."):
         name = "Dr. " + name
     greeting = f"{GREET[lang]} {name}".strip()
-    evidence, ask, cta = "", CTAS[lang], "binary_yes_no"
-    why = f"composer {VERSION}; {k}; facts from supplied contexts; language={lang}"
+    goal = next_step(k, category["slug"], customer)
+    evidence, ask, cta = "", action_cta(lang, goal), "binary_yes_no"
+    why = f"composer {VERSION}; {k}; facts from supplied contexts; language={lang}; next step={goal}"
     if customer:
         biz = clean(merchant.get("identity", {}).get("name", ""))
         channel = customer.get("preferences", {}).get("channel")
@@ -222,7 +317,11 @@ def _parts(category, merchant, trigger, customer=None):
         elif k == "appointment_tomorrow" and (p.get("appointment_at") or p.get("appointment_time_iso") or p.get("appointment_date")):
             evidence += "Appointment reminder: " + clean(p.get("appointment_at") or p.get("appointment_time_iso") or p.get("appointment_date")) + "."
         elif k == "chronic_refill_due" and p.get("stock_runs_out_iso"):
-            evidence += "Your recorded refill date is " + clean(p["stock_runs_out_iso"]) + ". A pharmacist must confirm stock and prescription details."
+            medicines = ", ".join(map(clean, p.get("molecule_list", [])))
+            evidence += "Your recorded refill date is " + clean(p["stock_runs_out_iso"]) + "."
+            if medicines:
+                evidence += " Listed medicines: " + medicines + "."
+            evidence += " A pharmacist must confirm stock and prescription details."
         elif k in ("wedding_package_followup", "bridal_followup") and p.get("wedding_date"):
             evidence += f"Following up on your trial for your {clean(p['wedding_date'])} wedding. Package details and prices need confirmation."
         elif k == "trial_followup" and p.get("trial_date"):
@@ -230,21 +329,24 @@ def _parts(category, merchant, trigger, customer=None):
         elif k in ("customer_lapsed_soft", "customer_lapsed_hard") and (p.get("days_since_last_visit") is not None or customer.get("relationship", {}).get("last_visit")):
             last = customer.get("relationship", {}).get("last_visit")
             evidence += f"Your last recorded visit was {clean(last)}." if last else f"It has been {p['days_since_last_visit']} days since your last visit."
-            evidence += " You can restart at your own pace."
+            evidence += " You can restart at your own pace." if category["slug"] == "gyms" else " No pressure to book."
+            offer = active_offer(merchant)
+            if offer:
+                evidence += " Listed option: " + offer + "; eligibility and availability need confirmation."
         elif k == "unplanned_slot_open" and p.get("available_slots"):
             evidence += "An appointment option has been listed."
         elif k == "supply_alert" and p.get("affected_batches"):
             evidence += "A supplied recall notice lists batches " + ", ".join(map(clean, p["affected_batches"])) + ". Please check with the pharmacist."
         else:
             return None, "missing_customer_event_facts"
-        evidence += " " + slots_text(p)
+        listed_slots = slots_text(p)
+        if listed_slots:
+            evidence += " " + listed_slots
         # No promotions piggybacked onto reminder-only consent.
-        if lang == "hi":
-            ask = "Aage baat karne ke liye YES bhejiye; reminders band karne ke liye STOP."
-        elif lang == "en":
-            ask = "Reply YES to discuss the next step; STOP to opt out."
-        else:
-            ask = CTAS[lang].replace("Draft", "Next step")
+        preference = customer.get("preferences", {}).get("preferred_slots")
+        if preference:
+            evidence += " Your recorded preference: " + human(preference) + "."
+        ask = action_cta(lang, goal)
         return (greeting, evidence.strip(), ask, cta, why + "; consent checked; no booking asserted"), None
 
     if k in ("research_digest", "regulation_change", "cde_opportunity"):
@@ -264,8 +366,14 @@ def _parts(category, merchant, trigger, customer=None):
                    else CTAS[lang].replace("draft", "supplied summary").replace("Draft", "Summary"))
         if p.get("deadline_iso"):
             evidence += " Listed deadline: " + clean(p["deadline_iso"]) + "."
-        if k == "cde_opportunity" and item.get("date"):
-            evidence += " Listed date: " + clean(item["date"]) + "."
+        if k == "cde_opportunity":
+            if item.get("date"):
+                evidence += " Listed date: " + clean(item["date"]) + "."
+            if number(p.get("credits")):
+                evidence += f" Listed credits: {p['credits']}."
+            if p.get("fee"):
+                evidence += " Fee terms: " + human(p["fee"]) + "."
+            ask = action_cta(lang, "an event review checklist")
         why += "; attributed supplied synthetic source, not independently verified"
     elif k in ("perf_dip", "perf_spike", "seasonal_perf_dip"):
         metric = p.get("metric")
@@ -282,6 +390,9 @@ def _parts(category, merchant, trigger, customer=None):
         evidence += " " + snapshot(merchant) if evidence else ""
         if k == "seasonal_perf_dip" and p.get("is_expected_seasonal"):
             evidence += " The supplied alert marks this as seasonal; it does not establish the cause."
+            members = merchant.get("customer_aggregate", {}).get("total_active_members")
+            if number(members):
+                evidence += f" Your roster lists {members} active members; a check-in can focus on their current needs."
         if not evidence:
             return None, "performance_evidence_missing"
     elif k == "renewal_due":
@@ -297,6 +408,9 @@ def _parts(category, merchant, trigger, customer=None):
         noun = NOUNS.get(category["slug"], "service")
         biz = clean(merchant.get("identity", {}).get("name", "your business"))
         evidence = f"For this week's check-in at {biz}, I can turn your answer into a post draft."
+        offer = active_offer(merchant)
+        if offer:
+            evidence += " Your current list includes " + offer + "; actual enquiries can guide what to feature."
         ask = (f"Is hafte sabse zyada kis {noun} ki enquiry aayi?" if lang == "hi"
                else f"Which {noun} drew the most enquiries this week?")
         cta = "open_ended"
@@ -334,6 +448,10 @@ def _parts(category, merchant, trigger, customer=None):
         if number(p.get("milestone_value")):
             gap = p["milestone_value"] - p["value_now"]
             evidence += f" Still {gap:g} short of {p['milestone_value']}." if gap > 0 else f" The {p['milestone_value']} milestone is reached."
+            if gap > 0:
+                goal = "an honest-feedback request" if p.get("metric") == "review_count" else "a progress note"
+                ask = action_cta(lang, goal)
+                why += "; target not yet reached; next step=" + goal
     elif k == "competitor_opened" and p.get("competitor_name"):
         evidence = f"The supplied alert names {clean(p['competitor_name'])}"
         if number(p.get("distance_km")):
@@ -360,8 +478,8 @@ def _parts(category, merchant, trigger, customer=None):
         days = p.get("days_since_last_merchant_message", p.get("days_since_expiry"))
         if days is not None:
             evidence = f"It has been {days} days since " + ("your last recorded reply." if k == "dormant_with_vera" else "your plan expired.")
-        evidence += " " + snapshot(merchant)
-        if not evidence.strip():
+        evidence += " A low-pressure check-in on your profile: " + snapshot(merchant)
+        if not snapshot(merchant):
             return None, "no_useful_facts"
     elif k == "category_trend_movement" and p.get("query") and number(p.get("delta_yoy")):
         evidence = f"Supplied search trend: {clean(p['query'])}, {p['delta_yoy'] * 100:+g}% year on year."
@@ -645,7 +763,7 @@ class Engine:
             else:
                 self.sessions[recipient] = max(now, self.sessions.get(recipient, now))
                 self.sent_counts[recipient] = 0
-                if re.search(r"\b(?:busy|later|not now|tomorrow|baad mein)\b", message, re.I):
+                if re.search(r"\b(?:busy|later|not now|no time|tomorrow|baad mein)\b", message, re.I):
                     seconds = 86400 if "tomorrow" in message.lower() else 1800
                     self.backoff[recipient] = now + timedelta(seconds=seconds)
                     result = {"action": "wait", "wait_seconds": seconds, "rationale": "Requested time; proactive outreach paused"}
@@ -680,12 +798,28 @@ class Engine:
         if re.search(r"\b(?:expensive|cost|price|budget|mehenga|paise)\b", low):
             offers = [clean(o["title"]) for o in merchant.get("offers", []) if o.get("status") == "active"]
             detail = ("Listed offer: " + offers[0] + ". ") if offers else ""
+            if trigger.get("kind") == "renewal_due":
+                amount = trigger.get("payload", {}).get("renewal_amount")
+                detail = f"Listed renewal price: \u20b9{amount}. " if number(amount) else "Renewal price is not supplied. "
+                return (detail + ("Plan ke terms pehle review karein; koi payment ya naya discount confirm nahi hai." if hi else
+                                  "Review the plan terms first; no payment or new discount is confirmed."), "none")
             return (detail + ("Naya discount ya price confirm nahi hai. Kya bina naye offer ka draft chahiye?" if hi else
                              "No new discount or price is confirmed. Should I draft a version without a new offer?"), "binary_yes_no")
+        if re.search(r"\b(?:already (?:done|updated|fixed)|did (?:this|that)|sorted)\b", low):
+            return (("Theek hai; wahi kaam dobara nahi karte. Agle context update mein status reflect hona chahiye." if hi else
+                     "Understood; no need to repeat that work. The next context update can reflect the new status."), "none")
+        if re.search(r"\b(?:not now|no time|too busy|busy|later)\b", low):
+            return (("Theek hai, abhi rok dete hain." if hi else "Understood; we can pause here."), "none")
         if YES.search(message):
             if customer:
-                return (("Aapki interest note kar li hai. Booking, stock aur delivery abhi confirm nahi hain. Apna preferred time bhejiye." if hi else
-                         "Interest noted. Booking, stock and delivery are not confirmed. Please share your preferred time."), "open_ended")
+                kind = ALIASES.get(trigger.get("kind"), trigger.get("kind"))
+                if kind == "chronic_refill_due":
+                    meds = ", ".join(map(clean, trigger.get("payload", {}).get("molecule_list", [])))
+                    return (f"Refill review request draft: {meds or 'your recorded medicines'}. " +
+                            ("Pharmacist se prescription aur stock verify karayein; dose ya brand change assume nahi kiya hai. Dispatch confirm nahi hai." if hi else
+                             "Ask the pharmacist to verify the prescription and stock; no dose or brand change is assumed. Dispatch is not confirmed."), "none")
+                return (("Request ka draft taiyar karte hain; booking confirm nahi hai. Aapka preferred din aur time kya hai?" if hi else
+                         "Let's prepare your enquiry; no booking is confirmed. What day and time would you prefer?"), "open_ended")
             if re.search(r"\b(?:join|judrna|judna|jurna)\b", low):
                 name = clean(merchant.get("identity", {}).get("name", ""))
                 return (f"Next step — onboarding draft for {name}. " +
@@ -695,6 +829,13 @@ class Engine:
             if item and trigger.get("kind") in ("research_digest", "research_digest_release", "regulation_change", "cde_opportunity"):
                 note = clean(item.get("summary") or item.get("title", ""))
                 source = clean(item.get("source", ""))
+                if trigger.get("kind") == "cde_opportunity":
+                    p = trigger.get("payload", {})
+                    details = [clean(item.get("date", "")), human(p.get("fee", ""))]
+                    if number(p.get("credits")):
+                        details.append(f"{p['credits']} credits")
+                    return (f"Event review ({source}): {note} " + "; ".join(v for v in details if v) +
+                            ". Confirm eligibility and registration with the named organiser. No registration has been made.", "none")
                 return (f"Here is the supplied summary ({source}): {note} " +
                         ("Yeh summary hai; full paper ya attachment available nahi hai." if hi else
                          "This is the supplied summary; the full paper or attachment is not available."), "none")
@@ -704,7 +845,18 @@ class Engine:
             conv["artifact"] = True
             kind = ALIASES.get(trigger.get("kind"), trigger.get("kind"))
             payload = trigger.get("payload", {})
-            if kind in ("perf_dip", "perf_spike", "seasonal_perf_dip"):
+            if kind == "active_planning_intent":
+                name = clean(merchant.get("identity", {}).get("name", "your business"))
+                topic = human(payload.get("intent_topic", "the proposed plan"))
+                needs = ("group size, preferred date, menu and a quote need confirmation" if category.get("slug") == "restaurants"
+                         else "participant age group, days, instructor and fees need confirmation" if category.get("slug") == "gyms"
+                         else "service scope, preferred date and price need confirmation")
+                artifact = f"Planning handoff for {name}: {topic}. Next: {needs}. Use the reviewed enquiry draft to collect interest; nothing has been published."
+            elif kind == "perf_spike":
+                artifact = "Enquiry-response draft for review: Thank you for your interest in " + clean(merchant.get("identity", {}).get("name", "our business")) + ". Which " + NOUNS.get(category.get("slug"), "service") + " are you asking about? We can discuss current options before confirming availability."
+            elif kind == "seasonal_perf_dip" and category.get("slug") == "gyms":
+                artifact = "Member check-in draft for review: How is your training routine going? Tell us which days work for you so we can discuss a manageable schedule. No attendance or outcome is assumed."
+            elif kind in ("perf_dip", "seasonal_perf_dip"):
                 artifact = "Review draft: " + snapshot(merchant) + " Compare the profile's current hours, photos and recent posts before choosing a change; the figures alone do not prove a cause."
             elif kind == "renewal_due":
                 sub = merchant.get("subscription", {})
@@ -719,7 +871,7 @@ class Engine:
             elif kind == "review_theme_emerged":
                 artifact = "Reply draft for review: Thank you for sharing your experience. We have noted your concern about " + human(payload.get("theme", "your visit")) + ". No resolution timeline is promised."
             else:
-                artifact = planning_draft(merchant, trigger)
+                artifact = outreach_draft(category, merchant, trigger)
             return (artifact + (" Edit batayein." if hi else " Share any edits."), "open_ended")
         if trigger.get("kind") == "curious_ask_due":
             name = clean(merchant.get("identity", {}).get("name", ""))
